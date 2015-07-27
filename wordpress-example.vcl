@@ -149,3 +149,25 @@ sub vcl_backend_response {
 	# Deliver the content
 	return(deliver);
 }
+
+# The routine when we deliver the HTTP request to the user
+# Last chance to modify headers that are sent to the client
+sub vcl_deliver {
+	if (obj.hits > 0) { 
+		set resp.http.X-Cache = "HIT";
+	} else {
+		set resp.http.X-Cache = "MISS";
+	}
+
+	# Remove some headers: PHP version
+	unset resp.http.X-Powered-By;
+
+	# Remove some headers: Version & OS
+	unset resp.http.Server;
+
+	# Remove some heanders: Varnish
+	unset resp.http.Via;
+	unset resp.http.X-Varnish;
+
+	return (deliver);
+}
