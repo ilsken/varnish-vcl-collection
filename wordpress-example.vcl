@@ -56,6 +56,22 @@ sub vcl_recv {
 		return(pass);
 	}
 
+	# Normalize Accept-Encoding header and compression
+	# https://www.varnish-cache.org/docs/3.0/tutorial/vary.html
+	if (req.http.Accept-Encoding) {
+		# Do not compress compressed files...
+		if (req.url ~ "\.(jpg|png|gif|gz|tgz|bz2|tbz|mp3|ogg)$") {
+				unset req.http.Accept-Encoding;
+		} elsif (req.http.Accept-Encoding ~ "gzip") {
+				set req.http.Accept-Encoding = "gzip";
+		} elsif (req.http.Accept-Encoding ~ "deflate") {
+				set req.http.Accept-Encoding = "deflate";
+		} else {
+			unset req.http.Accept-Encoding;
+		}
+	}
+
+
 	### looks like we might actually cache it!
 	# fix up the request
 	set req.url = regsub(req.url, "\?replytocom=.*$", "");
@@ -76,6 +92,11 @@ sub vcl_hash {
 	# Add the browser cookie only if a WordPress cookie found.
 	if (req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
 		hash_data(req.http.Cookie);
+	}
+
+	# If the client supports compression, keep that in a different cache
+	if (req.http.Accept-Encoding) {
+		hash_data(req.http.Accept-Encoding);
 	}
 }
 
