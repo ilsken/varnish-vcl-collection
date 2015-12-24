@@ -1,3 +1,5 @@
+vcl 4.0;
+
 backend default {
 	.host = "127.0.0.1";
 	.port = "8080";
@@ -5,7 +7,7 @@ backend default {
 
 import std;
 
-include "lib/xforward.vcl";
+#include "lib/xforward.vcl"; # Varnish 4.0: X-Forwarded-For is now set before vcl_recv
 include "lib/cloudflare.vcl";
 include "lib/purge.vcl";
 include "lib/bigfiles.vcl";        # Varnish 3.0.3+
@@ -32,13 +34,13 @@ acl purge {
 # http://ocaoimh.ie/2011/08/09/speed-up-wordpress-with-apache-and-varnish/
 sub vcl_recv {
 	# pipe on weird http methods
-	if (req.request !~ "^GET|HEAD|PUT|POST|TRACE|OPTIONS|DELETE$") {
+	if (req.method !~ "^GET|HEAD|PUT|POST|TRACE|OPTIONS|DELETE$") {
 		return(pipe);
 	}
 
 	### Check for reasons to bypass the cache!
 	# never cache anything except GET/HEAD
-	if (req.request != "GET" && req.request != "HEAD") {
+	if (req.method != "GET" && req.method != "HEAD") {
 		return(pass);
 	}
 	# don't cache logged-in users or authors
@@ -54,19 +56,36 @@ sub vcl_recv {
 		return(pass);
 	}
 
+	# Normalize Accept-Encoding header and compression
+	# https://www.varnish-cache.org/docs/3.0/tutorial/vary.html
+	if (req.http.Accept-Encoding) {
+		# Do not compress compressed files...
+		if (req.url ~ "\.(jpg|png|gif|gz|tgz|bz2|tbz|mp3|ogg)$") {
+				unset req.http.Accept-Encoding;
+		} elsif (req.http.Accept-Encoding ~ "gzip") {
+				set req.http.Accept-Encoding = "gzip";
+		} elsif (req.http.Accept-Encoding ~ "deflate") {
+				set req.http.Accept-Encoding = "deflate";
+		} else {
+			unset req.http.Accept-Encoding;
+		}
+	}
+
+
 	### looks like we might actually cache it!
 	# fix up the request
-	set req.grace = 2m;
 	set req.url = regsub(req.url, "\?replytocom=.*$", "");
 
 	# Remove has_js, Google Analytics __*, and wooTracker cookies.
 	set req.http.Cookie = regsuball(req.http.Cookie, "(^|;\s*)(__[a-z]+|has_js|wooTracker)=[^;]*", "");
 	set req.http.Cookie = regsub(req.http.Cookie, "^;\s*", "");
+
+	# Remove empty/whitespace cookies
 	if (req.http.Cookie ~ "^\s*$") {
 		unset req.http.Cookie;
 	}
 
-	return(lookup);
+	return(hash);
 }
 
 sub vcl_hash {
@@ -74,9 +93,14 @@ sub vcl_hash {
 	if (req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
 		hash_data(req.http.Cookie);
 	}
+
+	# If the client supports compression, keep that in a different cache
+	if (req.http.Accept-Encoding) {
+		hash_data(req.http.Accept-Encoding);
+	}
 }
 
-sub vcl_fetch {
+sub vcl_backend_response {
 	# make sure grace is at least 2 minutes
 	if (beresp.grace < 2m) {
 		set beresp.grace = 2m;
@@ -90,17 +114,20 @@ sub vcl_fetch {
 	# Varnish determined the object was not cacheable
 	if (beresp.ttl <= 0s) {
 		set beresp.http.X-Cacheable = "NO:Not Cacheable";
-		return(hit_for_pass);
+		set beresp.uncacheable = true;
+		return (deliver);
 
 	# You don't wish to cache content for logged in users
-	} else if (req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
+	} else if (bereq.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
 		set beresp.http.X-Cacheable = "NO:Got Session";
-		return(hit_for_pass);
+		set beresp.uncacheable = true;
+		return (deliver);
 
 	# You are respecting the Cache-Control=private header from the backend
 	} else if (beresp.http.Cache-Control ~ "private") {
 		set beresp.http.X-Cacheable = "NO:Cache-Control=private";
-		return(hit_for_pass);
+		set beresp.uncacheable = true;
+		return (deliver);
 
 	# You are extending the lifetime of the object artificially
 	} else if (beresp.ttl < 300s) {
@@ -121,4 +148,26 @@ sub vcl_fetch {
 
 	# Deliver the content
 	return(deliver);
+}
+
+# The routine when we deliver the HTTP request to the user
+# Last chance to modify headers that are sent to the client
+sub vcl_deliver {
+	if (obj.hits > 0) { 
+		set resp.http.X-Cache = "HIT";
+	} else {
+		set resp.http.X-Cache = "MISS";
+	}
+
+	# Remove some headers: PHP version
+	unset resp.http.X-Powered-By;
+
+	# Remove some headers: Version & OS
+	unset resp.http.Server;
+
+	# Remove some heanders: Varnish
+	unset resp.http.Via;
+	unset resp.http.X-Varnish;
+
+	return (deliver);
 }
