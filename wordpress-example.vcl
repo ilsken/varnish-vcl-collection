@@ -46,7 +46,9 @@ sub vcl_recv {
 	# don't cache logged-in users or authors
 	if (req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
 		return(pass);
-	}
+  } else {
+    unset req.http.cookie;
+  }
 	# don't cache ajax requests
 	if (req.http.X-Requested-With == "XMLHttpRequest") {
 		return(pass);
@@ -76,14 +78,6 @@ sub vcl_recv {
 	# fix up the request
 	set req.url = regsub(req.url, "\?replytocom=.*$", "");
 
-	# Remove has_js, Google Analytics __*, and wooTracker cookies.
-	set req.http.Cookie = regsuball(req.http.Cookie, "(^|;\s*)(__[a-z]+|has_js|wooTracker)=[^;]*", "");
-	set req.http.Cookie = regsub(req.http.Cookie, "^;\s*", "");
-
-	# Remove empty/whitespace cookies
-	if (req.http.Cookie ~ "^\s*$") {
-		unset req.http.Cookie;
-	}
 
 	return(hash);
 }
